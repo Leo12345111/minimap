@@ -18,7 +18,7 @@ mapFrame.Position = UDim2.new(0, 10, 1, -360)
 mapFrame.BackgroundColor3 = Color3.fromRGB(135, 206, 235)
 mapFrame.BorderSizePixel = 2
 mapFrame.BorderColor3 = Color3.fromRGB(0, 0, 0)
-mapFrame.ClipsDescendants = true
+mapFrame.ClipsDescendants = true 
 mapFrame.Parent = screenGui
 
 local scriptActive = true
@@ -29,7 +29,7 @@ local lastUpdatePos = Vector3.new(0, 0, 0)
 local lastUpdateRot = 0 
 
 local SCAN_RADIUS = 100
-local SCAN_VERTICAL = 200
+local SCAN_VERTICAL = 2000 
 local MAP_SIZE = 250
 local SCALE = MAP_SIZE / (SCAN_RADIUS * 2)
 local HALF_MAP = MAP_SIZE / 2
@@ -46,13 +46,24 @@ local CFrame_new = CFrame.new
 local foundThisScan = {}
 local overlapParams = OverlapParams.new()
 overlapParams.FilterType = Enum.RaycastFilterType.Exclude
+overlapParams.MaxParts = 100000 
+
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
 
 local function getFrame()
     local f = table.remove(framePool)
     if not f then
         f = Instance.new("Frame")
+        f.AnchorPoint = Vector2.new(0.5, 0.5)
         f.BorderSizePixel = 1
         f.BorderColor3 = Color3.fromRGB(0, 0, 0)
+        
+        local corner = Instance.new("UICorner")
+        corner.Name = "UICorner"
+        corner.CornerRadius = UDim.new(0, 0) 
+        corner.Parent = f
+        
         f.Parent = mapFrame
     end
     f.Visible = true
@@ -62,6 +73,39 @@ end
 local function releaseFrame(f)
     f.Visible = false
     table.insert(framePool, f)
+end
+
+local function getRealSize(part)
+    local size = part.Size
+    local mesh = part:FindFirstChildWhichIsA("DataModelMesh")
+    if mesh and typeof(mesh.Scale) == "Vector3" then
+        return Vector3_new(size.X * mesh.Scale.X, size.Y * mesh.Scale.Y, size.Z * mesh.Scale.Z)
+    end
+    return size
+end
+
+local function processPartForMap(obj)
+    if obj.Transparency < 1 and not Players:GetPlayerFromCharacter(obj.Parent) then
+        foundThisScan[obj] = true
+        local f = partFrames[obj]
+        
+        if not f then
+            f = getFrame()
+            f.BackgroundColor3 = obj.Color 
+            partFrames[obj] = f
+            
+            local isRound = false
+            if obj:IsA("Part") and (obj.Shape == Enum.PartType.Ball or obj.Shape == Enum.PartType.Cylinder) then
+                isRound = true
+            end
+            
+            local corner = f:FindFirstChild("UICorner")
+            if corner then
+                corner.CornerRadius = isRound and UDim.new(0.5, 0) or UDim.new(0, 0)
+            end
+        end
+        f.ZIndex = floor(obj.Position.Y) 
+    end
 end
 
 local function updateElementPositions()
@@ -86,16 +130,13 @@ local function updateElementPositions()
         local guiX = HALF_MAP + relX
         local guiY = HALF_MAP + relZ
         
-        local size = part.Size
-        local sX, sZ = size.X * SCALE, size.Z * SCALE
+        local realSize = getRealSize(part)
+        local sX, sZ = realSize.X * SCALE, realSize.Z * SCALE
         
-        if guiX < -sX or guiX > MAP_SIZE + sX or guiY < -sZ or guiY > MAP_SIZE + sZ then
-            frame.Visible = false
-        else
-            frame.Visible = true
-            frame.Position = UDim2_new(0, guiX - (sX * 0.5), 0, guiY - (sZ * 0.5))
-            frame.Size = UDim2_new(0, max(1, sX), 0, max(1, sZ))
-        end
+        frame.Visible = true
+        frame.Position = UDim2_new(0, guiX, 0, guiY)
+        frame.Size = UDim2_new(0, max(1, sX), 0, max(1, sZ))
+        frame.Rotation = -part.Orientation.Y
     end
 
     for p, container in next, playerIcons do
@@ -128,24 +169,28 @@ local function performScan()
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if not root then return end
     
-    overlapParams.FilterDescendantsInstances = {char}
     table.clear(foundThisScan)
+    overlapParams.FilterDescendantsInstances = {char}
+    rayParams.FilterDescendantsInstances = {char}
     
+    local downRay = workspace:Raycast(root.Position, Vector3_new(0, -500, 0), rayParams)
+    
+    if downRay then
+        if downRay.Instance:IsA("Terrain") then
+            local matColor = workspace.Terrain:GetMaterialColor(downRay.Material)
+            mapFrame.BackgroundColor3 = matColor
+        elseif downRay.Instance:IsA("BasePart") then
+            mapFrame.BackgroundColor3 = Color3.fromRGB(135, 206, 235)
+            processPartForMap(downRay.Instance)
+        end
+    else
+        mapFrame.BackgroundColor3 = Color3.fromRGB(135, 206, 235)
+    end
+
     local parts = workspace:GetPartBoundsInBox(CFrame_new(root.Position), Vector3_new(SCAN_RADIUS * 2, SCAN_VERTICAL, SCAN_RADIUS * 2), overlapParams)
 
     for i = 1, #parts do
-        local obj = parts[i]
-        
-        if obj.Transparency < 0.6 and not Players:GetPlayerFromCharacter(obj.Parent) then
-            foundThisScan[obj] = true
-            local f = partFrames[obj]
-            if not f then
-                f = getFrame()
-                f.BackgroundColor3 = obj.Color 
-                partFrames[obj] = f
-            end
-            f.ZIndex = floor(obj.Position.Y) 
-        end
+        processPartForMap(parts[i])
     end
 
     for part, frame in next, partFrames do
