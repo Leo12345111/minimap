@@ -11,15 +11,32 @@ screenGui.ResetOnSpawn = false
 screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 screenGui.Parent = playerGui
 
-local mapFrame = Instance.new("Frame")
-mapFrame.Name = "MapFrame"
-mapFrame.Size = UDim2.new(0, 250, 0, 250)
-mapFrame.Position = UDim2.new(0, 10, 1, -360)
-mapFrame.BackgroundColor3 = Color3.fromRGB(135, 206, 235)
-mapFrame.BorderSizePixel = 2
-mapFrame.BorderColor3 = Color3.fromRGB(0, 0, 0)
-mapFrame.ClipsDescendants = true 
-mapFrame.Parent = screenGui
+-- THE CONTAINER: Holds everything together
+local mapContainer = Instance.new("Frame")
+mapContainer.Name = "MapContainer"
+mapContainer.Size = UDim2.new(0, 250, 0, 250)
+mapContainer.Position = UDim2.new(0, 10, 1, -360)
+mapContainer.BackgroundTransparency = 1 
+mapContainer.BorderSizePixel = 0
+mapContainer.Parent = screenGui
+
+-- THE SCISSORS: CanvasGroup physically cuts all pixels that go outside of its box
+local mapClip = Instance.new("CanvasGroup")
+mapClip.Name = "MapClip"
+mapClip.Size = UDim2.new(1, 0, 1, 0)
+mapClip.BackgroundColor3 = Color3.fromRGB(135, 206, 235)
+mapClip.BorderSizePixel = 0
+mapClip.Parent = mapContainer
+
+-- THE OUTLINE: Draws the big black border around the whole minimap
+local mapOutline = Instance.new("Frame")
+mapOutline.Name = "MapOutline"
+mapOutline.Size = UDim2.new(1, 0, 1, 0)
+mapOutline.BackgroundTransparency = 1
+mapOutline.BorderColor3 = Color3.fromRGB(0, 0, 0)
+mapOutline.BorderSizePixel = 2
+mapOutline.ZIndex = 99999 
+mapOutline.Parent = mapContainer
 
 local scriptActive = true
 local partFrames = {}
@@ -28,8 +45,8 @@ local playerIcons = {}
 local lastUpdatePos = Vector3.new(0, 0, 0)
 local lastUpdateRot = 0 
 
-local SCAN_RADIUS = 100
-local SCAN_VERTICAL = 2000 
+local SCAN_RADIUS = 150 
+local SCAN_VERTICAL = 10000 
 local MAP_SIZE = 250
 local SCALE = MAP_SIZE / (SCAN_RADIUS * 2)
 local HALF_MAP = MAP_SIZE / 2
@@ -38,6 +55,7 @@ local framePool = {}
 
 local floor = math.floor
 local max = math.max
+local min = math.min
 local abs = math.abs
 local UDim2_new = UDim2.new
 local Vector3_new = Vector3.new
@@ -56,15 +74,23 @@ local function getFrame()
     if not f then
         f = Instance.new("Frame")
         f.AnchorPoint = Vector2.new(0.5, 0.5)
-        f.BorderSizePixel = 1
-        f.BorderColor3 = Color3.fromRGB(0, 0, 0)
+        -- Turn off default border because UICorner breaks it
+        f.BorderSizePixel = 0 
         
         local corner = Instance.new("UICorner")
         corner.Name = "UICorner"
         corner.CornerRadius = UDim.new(0, 0) 
         corner.Parent = f
         
-        f.Parent = mapFrame
+        -- THE FIX: UIStroke forces an outline on the shape even if it has rounded corners!
+        local stroke = Instance.new("UIStroke")
+        stroke.Name = "UIStroke"
+        stroke.Color = Color3.fromRGB(0, 0, 0) -- Black outline
+        stroke.Thickness = 1 -- 1 pixel thick
+        stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+        stroke.Parent = f
+        
+        f.Parent = mapClip
     end
     f.Visible = true
     return f
@@ -82,30 +108,6 @@ local function getRealSize(part)
         return Vector3_new(size.X * mesh.Scale.X, size.Y * mesh.Scale.Y, size.Z * mesh.Scale.Z)
     end
     return size
-end
-
-local function processPartForMap(obj)
-    if obj.Transparency < 1 and not Players:GetPlayerFromCharacter(obj.Parent) then
-        foundThisScan[obj] = true
-        local f = partFrames[obj]
-        
-        if not f then
-            f = getFrame()
-            f.BackgroundColor3 = obj.Color 
-            partFrames[obj] = f
-            
-            local isRound = false
-            if obj:IsA("Part") and (obj.Shape == Enum.PartType.Ball or obj.Shape == Enum.PartType.Cylinder) then
-                isRound = true
-            end
-            
-            local corner = f:FindFirstChild("UICorner")
-            if corner then
-                corner.CornerRadius = isRound and UDim.new(0.5, 0) or UDim.new(0, 0)
-            end
-        end
-        f.ZIndex = floor(obj.Position.Y) 
-    end
 end
 
 local function updateElementPositions()
@@ -173,24 +175,81 @@ local function performScan()
     overlapParams.FilterDescendantsInstances = {char}
     rayParams.FilterDescendantsInstances = {char}
     
-    local downRay = workspace:Raycast(root.Position, Vector3_new(0, -500, 0), rayParams)
+    local downRay = workspace:Raycast(root.Position, Vector3_new(0, -10000, 0), rayParams)
     
-    if downRay then
-        if downRay.Instance:IsA("Terrain") then
-            local matColor = workspace.Terrain:GetMaterialColor(downRay.Material)
-            mapFrame.BackgroundColor3 = matColor
-        elseif downRay.Instance:IsA("BasePart") then
-            mapFrame.BackgroundColor3 = Color3.fromRGB(135, 206, 235)
-            processPartForMap(downRay.Instance)
-        end
+    if downRay and downRay.Instance:IsA("Terrain") then
+        local matColor = workspace.Terrain:GetMaterialColor(downRay.Material)
+        mapClip.BackgroundColor3 = matColor
     else
-        mapFrame.BackgroundColor3 = Color3.fromRGB(135, 206, 235)
+        mapClip.BackgroundColor3 = Color3.fromRGB(135, 206, 235)
     end
 
     local parts = workspace:GetPartBoundsInBox(CFrame_new(root.Position), Vector3_new(SCAN_RADIUS * 2, SCAN_VERTICAL, SCAN_RADIUS * 2), overlapParams)
 
+    local columns = {}
+    
+    if downRay and downRay.Instance:IsA("BasePart") then
+        table.insert(parts, downRay.Instance)
+    end
+
     for i = 1, #parts do
-        processPartForMap(parts[i])
+        local obj = parts[i]
+        if obj.Transparency < 1 and not Players:GetPlayerFromCharacter(obj.Parent) then
+            local gridX = floor(obj.Position.X / 10)
+            local gridZ = floor(obj.Position.Z / 10)
+            local key = gridX .. "_" .. gridZ
+            
+            if not columns[key] then columns[key] = {} end
+            
+            local alreadyAdded = false
+            for _, existingObj in ipairs(columns[key]) do
+                if existingObj == obj then alreadyAdded = true break end
+            end
+            
+            if not alreadyAdded then
+                table.insert(columns[key], obj)
+            end
+        end
+    end
+
+    local partDepth = {}
+    for _, col in pairs(columns) do
+        table.sort(col, function(a, b) return a.Position.Y < b.Position.Y end)
+        for idx, obj in ipairs(col) do
+            partDepth[obj] = max(partDepth[obj] or 1, idx)
+        end
+    end
+
+    for obj, depth in pairs(partDepth) do
+        foundThisScan[obj] = true
+        local f = partFrames[obj]
+        
+        if not f then
+            f = getFrame()
+            f.BackgroundColor3 = obj.Color 
+            partFrames[obj] = f
+            
+            local isRound = false
+            if obj:IsA("Part") and (obj.Shape == Enum.PartType.Ball or obj.Shape == Enum.PartType.Cylinder) then
+                isRound = true
+            end
+            
+            local corner = f:FindFirstChild("UICorner")
+            if corner then
+                corner.CornerRadius = isRound and UDim.new(0.5, 0) or UDim.new(0, 0)
+            end
+        end
+        
+        -- Keeps the 20% layering math perfect
+        f.BackgroundTransparency = min((depth - 1) * 0.2, 0.8)
+        
+        -- Also applies transparency to the stroke outline so it matches perfectly
+        local stroke = f:FindFirstChild("UIStroke")
+        if stroke then
+            stroke.Transparency = min((depth - 1) * 0.2, 0.8)
+        end
+        
+        f.ZIndex = floor(obj.Position.Y) 
     end
 
     for part, frame in next, partFrames do
@@ -214,7 +273,7 @@ local function performScan()
             container.Size = UDim2_new(0, 20, 0, 20)
             container.BackgroundTransparency = 1
             container.ZIndex = 50000 
-            container.Parent = mapFrame
+            container.Parent = mapClip
             playerIcons[p] = container
             
             local icon = Instance.new("ImageLabel")
