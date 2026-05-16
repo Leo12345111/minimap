@@ -11,7 +11,6 @@ screenGui.ResetOnSpawn = false
 screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 screenGui.Parent = playerGui
 
--- THE CONTAINER: Holds everything together
 local mapContainer = Instance.new("Frame")
 mapContainer.Name = "MapContainer"
 mapContainer.Size = UDim2.new(0, 250, 0, 250)
@@ -20,7 +19,6 @@ mapContainer.BackgroundTransparency = 1
 mapContainer.BorderSizePixel = 0
 mapContainer.Parent = screenGui
 
--- THE SCISSORS: CanvasGroup physically cuts all pixels that go outside of its box
 local mapClip = Instance.new("CanvasGroup")
 mapClip.Name = "MapClip"
 mapClip.Size = UDim2.new(1, 0, 1, 0)
@@ -28,7 +26,6 @@ mapClip.BackgroundColor3 = Color3.fromRGB(135, 206, 235)
 mapClip.BorderSizePixel = 0
 mapClip.Parent = mapContainer
 
--- THE OUTLINE: Draws the big black border around the whole minimap
 local mapOutline = Instance.new("Frame")
 mapOutline.Name = "MapOutline"
 mapOutline.Size = UDim2.new(1, 0, 1, 0)
@@ -41,12 +38,13 @@ mapOutline.Parent = mapContainer
 local scriptActive = true
 local partFrames = {}
 local playerIcons = {}
+local partCache = {}
 
 local lastUpdatePos = Vector3.new(0, 0, 0)
 local lastUpdateRot = 0 
 
 local SCAN_RADIUS = 150 
-local SCAN_VERTICAL = 10000 
+local SCAN_VERTICAL = 1000 
 local MAP_SIZE = 250
 local SCALE = MAP_SIZE / (SCAN_RADIUS * 2)
 local HALF_MAP = MAP_SIZE / 2
@@ -64,17 +62,30 @@ local CFrame_new = CFrame.new
 local foundThisScan = {}
 local overlapParams = OverlapParams.new()
 overlapParams.FilterType = Enum.RaycastFilterType.Exclude
-overlapParams.MaxParts = 100000 
+overlapParams.MaxParts = 2000 
 
 local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+local camera = workspace.CurrentCamera
+
+local function getCenterPosAndRot()
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if root then
+        return root.Position, root.Orientation.Y
+    end
+    
+    local camCFrame = camera.CFrame
+    local _, y, _ = camCFrame:ToOrientation()
+    return camCFrame.Position, math.deg(y)
+end
 
 local function getFrame()
     local f = table.remove(framePool)
     if not f then
         f = Instance.new("Frame")
         f.AnchorPoint = Vector2.new(0.5, 0.5)
-        -- Turn off default border because UICorner breaks it
         f.BorderSizePixel = 0 
         
         local corner = Instance.new("UICorner")
@@ -82,11 +93,10 @@ local function getFrame()
         corner.CornerRadius = UDim.new(0, 0) 
         corner.Parent = f
         
-        -- THE FIX: UIStroke forces an outline on the shape even if it has rounded corners!
         local stroke = Instance.new("UIStroke")
         stroke.Name = "UIStroke"
-        stroke.Color = Color3.fromRGB(0, 0, 0) -- Black outline
-        stroke.Thickness = 1 -- 1 pixel thick
+        stroke.Color = Color3.fromRGB(0, 0, 0)
+        stroke.Thickness = 1
         stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
         stroke.Parent = f
         
@@ -101,27 +111,40 @@ local function releaseFrame(f)
     table.insert(framePool, f)
 end
 
-local function getRealSize(part)
+local function getCachedPartData(part)
+    if partCache[part] then return partCache[part] end
+    
     local size = part.Size
     local mesh = part:FindFirstChildWhichIsA("DataModelMesh")
+    local realSize = size
     if mesh and typeof(mesh.Scale) == "Vector3" then
-        return Vector3_new(size.X * mesh.Scale.X, size.Y * mesh.Scale.Y, size.Z * mesh.Scale.Z)
+        realSize = Vector3_new(size.X * mesh.Scale.X, size.Y * mesh.Scale.Y, size.Z * mesh.Scale.Z)
     end
-    return size
+    
+    local isRound = false
+    if part:IsA("Part") and (part.Shape == Enum.PartType.Ball or part.Shape == Enum.PartType.Cylinder) then
+        isRound = true
+    end
+    
+    local data = {
+        sX = realSize.X * SCALE,
+        sZ = realSize.Z * SCALE,
+        color = part.Color,
+        isRound = isRound
+    }
+    partCache[part] = data
+    return data
 end
 
 local function updateElementPositions()
-    local char = player.Character
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    if not root then return end
-    
-    local centerPos = root.Position
-    local cX, cZ = centerPos.X, centerPos.Z
+    local cPos, cRot = getCenterPosAndRot()
+    local cX, cZ = cPos.X, cPos.Z
 
     for part, frame in next, partFrames do
         if not part.Parent then
             releaseFrame(frame)
             partFrames[part] = nil
+            partCache[part] = nil
             continue
         end
 
@@ -132,12 +155,11 @@ local function updateElementPositions()
         local guiX = HALF_MAP + relX
         local guiY = HALF_MAP + relZ
         
-        local realSize = getRealSize(part)
-        local sX, sZ = realSize.X * SCALE, realSize.Z * SCALE
+        local data = getCachedPartData(part)
         
         frame.Visible = true
         frame.Position = UDim2_new(0, guiX, 0, guiY)
-        frame.Size = UDim2_new(0, max(1, sX), 0, max(1, sZ))
+        frame.Size = UDim2_new(0, max(1, data.sX), 0, max(1, data.sZ))
         frame.Rotation = -part.Orientation.Y
     end
 
@@ -157,7 +179,7 @@ local function updateElementPositions()
             if p == player then
                 local pivot = container:FindFirstChild("DirectionPivot")
                 if pivot then
-                    pivot.Rotation = -root.Orientation.Y
+                    pivot.Rotation = -cRot
                 end
             end
         else
@@ -167,15 +189,19 @@ local function updateElementPositions()
 end
 
 local function performScan()
-    local char = player.Character
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    if not root then return end
+    local cPos, cRot = getCenterPosAndRot()
     
     table.clear(foundThisScan)
-    overlapParams.FilterDescendantsInstances = {char}
-    rayParams.FilterDescendantsInstances = {char}
+    local char = player.Character
+    if char then
+        overlapParams.FilterDescendantsInstances = {char}
+        rayParams.FilterDescendantsInstances = {char}
+    else
+        overlapParams.FilterDescendantsInstances = {}
+        rayParams.FilterDescendantsInstances = {}
+    end
     
-    local downRay = workspace:Raycast(root.Position, Vector3_new(0, -10000, 0), rayParams)
+    local downRay = workspace:Raycast(cPos, Vector3_new(0, -10000, 0), rayParams)
     
     if downRay and downRay.Instance:IsA("Terrain") then
         local matColor = workspace.Terrain:GetMaterialColor(downRay.Material)
@@ -184,7 +210,7 @@ local function performScan()
         mapClip.BackgroundColor3 = Color3.fromRGB(135, 206, 235)
     end
 
-    local parts = workspace:GetPartBoundsInBox(CFrame_new(root.Position), Vector3_new(SCAN_RADIUS * 2, SCAN_VERTICAL, SCAN_RADIUS * 2), overlapParams)
+    local parts = workspace:GetPartBoundsInBox(CFrame_new(cPos), Vector3_new(SCAN_RADIUS * 2, SCAN_VERTICAL, SCAN_RADIUS * 2), overlapParams)
 
     local columns = {}
     
@@ -197,13 +223,14 @@ local function performScan()
         if obj.Transparency < 1 and not Players:GetPlayerFromCharacter(obj.Parent) then
             local gridX = floor(obj.Position.X / 10)
             local gridZ = floor(obj.Position.Z / 10)
-            local key = gridX .. "_" .. gridZ
+            local key = gridX * 100000 + gridZ 
             
             if not columns[key] then columns[key] = {} end
             
             local alreadyAdded = false
-            for _, existingObj in ipairs(columns[key]) do
-                if existingObj == obj then alreadyAdded = true break end
+            local col = columns[key]
+            for j = 1, #col do
+                if col[j] == obj then alreadyAdded = true break end
             end
             
             if not alreadyAdded then
@@ -223,30 +250,25 @@ local function performScan()
     for obj, depth in pairs(partDepth) do
         foundThisScan[obj] = true
         local f = partFrames[obj]
+        local data = getCachedPartData(obj)
         
         if not f then
             f = getFrame()
-            f.BackgroundColor3 = obj.Color 
+            f.BackgroundColor3 = data.color 
             partFrames[obj] = f
-            
-            local isRound = false
-            if obj:IsA("Part") and (obj.Shape == Enum.PartType.Ball or obj.Shape == Enum.PartType.Cylinder) then
-                isRound = true
-            end
             
             local corner = f:FindFirstChild("UICorner")
             if corner then
-                corner.CornerRadius = isRound and UDim.new(0.5, 0) or UDim.new(0, 0)
+                corner.CornerRadius = data.isRound and UDim.new(0.5, 0) or UDim.new(0, 0)
             end
         end
         
-        -- Keeps the 20% layering math perfect
-        f.BackgroundTransparency = min((depth - 1) * 0.2, 0.8)
+        local alpha = min((depth - 1) * 0.2, 0.8)
+        f.BackgroundTransparency = alpha
         
-        -- Also applies transparency to the stroke outline so it matches perfectly
         local stroke = f:FindFirstChild("UIStroke")
         if stroke then
-            stroke.Transparency = min((depth - 1) * 0.2, 0.8)
+            stroke.Transparency = alpha
         end
         
         f.ZIndex = floor(obj.Position.Y) 
@@ -256,6 +278,7 @@ local function performScan()
         if not foundThisScan[part] then
             releaseFrame(frame)
             partFrames[part] = nil
+            partCache[part] = nil
         end
     end
 
@@ -266,7 +289,7 @@ local function performScan()
         end
     end
 
-    for _, p in next, Players:GetPlayers() do
+    for _, p in ipairs(Players:GetPlayers()) do
         if not playerIcons[p] and p.Character then
             local container = Instance.new("Frame")
             container.Name = p.Name .. "Icon"
@@ -319,19 +342,15 @@ inputConn = UserInputService.InputBegan:Connect(function(input, processed)
         performScan()
     elseif input.KeyCode == Enum.KeyCode.U then
         scriptActive = false
-        inputConn:Disconnect()
+        if inputConn then inputConn:Disconnect() end
         screenGui:Destroy()
     end
 end)
 
 RunService.Heartbeat:Connect(function()
     if not scriptActive then return end
-    local char = player.Character
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    if not root then return end
     
-    local currentPos = root.Position
-    local currentRot = root.Orientation.Y
+    local currentPos, currentRot = getCenterPosAndRot()
     
     local magX = currentPos.X - lastUpdatePos.X
     local magZ = currentPos.Z - lastUpdatePos.Z
